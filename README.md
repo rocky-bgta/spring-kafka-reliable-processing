@@ -1,47 +1,30 @@
 # Spring Kafka Reliable Processing
 
-Incremental Java 17 project focused on correctness under duplicate event delivery.
-
-## Run current tests
-
-```bash
-mvn clean verify
-```
+Java 17 / Spring Boot 3.3 example of at-least-once Kafka consumption with database idempotency.
 
 ## Implemented
 
-- `IdempotencyGate` uses `ConcurrentHashMap.newKeySet()` to atomically claim event IDs within one JVM.
-- JUnit 5 checks duplicates, blank IDs and concurrent claims.
-- GitHub Actions runs Maven verification.
+- Manual Kafka acknowledgment after a transactional service call returns.
+- PostgreSQL unique event claim via INSERT ... ON CONFLICT DO NOTHING.
+- Business event payload inserted in the same database transaction as the claim.
+- Duplicate deliveries do not overwrite business data.
+- Configured exponential backoff, recovery and dead-letter publishing to events.DLT.
+- Testcontainers PostgreSQL integration test for duplicate delivery and business persistence.
+- Unit tests for listener acknowledgment, processor and error handler.
 
-## Current demonstration flow
+## Request flow
 
-```mermaid
-flowchart LR
-  E[Event with eventId] --> G[In-memory IdempotencyGate]
-  G -->|First claim| P[Proceed with simulated work]
-  G -->|Duplicate| D[Skip duplicate]
-```
+Kafka event -> listener -> PostgreSQL transaction -> claim unique event ID -> write business event (if new) -> commit -> acknowledge Kafka offset.
 
-**Not production-safe yet:** The in-memory set is lost on restart and cannot coordinate multiple instances. It also marks an event claimed before business work succeeds. Do **not** acknowledge a Kafka offset based on this gate alone.
+On failure the listener throws; Spring Kafka's error handler retries and then publishes to a dead-letter topic. The database and Kafka offset commits are not atomic; a crash between commits can cause redelivery, which the database uniqueness constraint handles.
 
-## Target production architecture (not implemented)
+## Run
 
-```mermaid
-flowchart LR
-  K[Kafka partition] --> C[Spring Kafka listener, manual ack]
-  C --> T[Database transaction]
-  T --> U[Unique processed-event ID constraint]
-  T --> B[Business update]
-  T -->|Committed| A[Acknowledge offset]
-  C -->|Transient failure| R[Retry/backoff]
-  R -->|Exhausted| D[Dead-letter topic]
-```
+Java 17, Maven, PostgreSQL, Kafka and Docker (for integration tests) are required. Set DB_URL, DB_USER, DB_PASSWORD and KAFKA_BOOTSTRAP_SERVERS as appropriate. Provision events and events.DLT with matching partition counts.
 
-Database changes and the deduplication record must commit atomically; commit the Kafka offset only after successful DB commit. A crash after DB commit but before offset commit may redeliver the event, so database idempotency remains necessary. Offset commits and database commits are not one atomic transaction by default.
+    mvn clean verify
+    mvn spring-boot:run
 
-## Next implementation milestones
+## Still to verify
 
-- Spring Boot listener, manual ack configuration and explicit consumer settings.
-- PostgreSQL unique key and transactional business update.
-- Kafka/Postgres Testcontainers integration tests, retries and DLT.
+Kafka broker end-to-end retry and DLT behavior have not yet been tested. Production deployments also need monitoring, dead-letter replay procedures, schema validation and domain-specific business logic. IdempotencyGate is an in-memory teaching example, not the durable production gate.
