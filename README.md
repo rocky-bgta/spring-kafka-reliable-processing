@@ -68,3 +68,53 @@ DLT events need operational monitoring, retention policy, root-cause triage and 
 - GitHub Actions runs `mvn -B verify` on pushes and pull requests.
 
 **Scope:** This is a reference application, not a production deployment blueprint. Production work may require TLS/SASL, secrets management, observability, schema contracts, authorization, poison-message alerting, DLT replay, retention policy and operational load testing. `IdempotencyGate` is an isolated in-memory educational example; the listener uses the durable PostgreSQL mechanism instead.
+
+
+## Step-by-step local quickstart (Windows PowerShell, macOS, or Linux)
+
+**Prerequisites:** JDK 17, Maven 3.9+, Git, Docker Desktop/Engine with Linux containers, free TCP ports **5432** and **9092**, internet access to download Maven dependencies and container images. Confirm `java -version`, `mvn -version`, `git --version` and `docker info` work. Docker must be **running**, not merely installed. Allow sufficient Docker memory for Kafka and PostgreSQL.
+
+1. Clone and enter the project:
+   ```bash
+   git clone https://github.com/rocky-bgta/spring-kafka-reliable-processing.git
+   cd spring-kafka-reliable-processing
+   ```
+2. Start the local dependencies (the credentials below are **development only**):
+   ```bash
+   docker run -d --name reliable-postgres -e POSTGRES_DB=events -e POSTGRES_USER=events -e POSTGRES_PASSWORD=events -p 5432:5432 postgres:16-alpine
+   docker run -d --name reliable-kafka -p 9092:9092 apache/kafka:3.8.1
+   ```
+   Wait for both containers to initialize; check `docker ps` and `docker logs reliable-kafka`. The Apache Kafka image starts a single-node development broker with its default configuration; use the Testcontainers test for a self-contained verification if your local Kafka networking differs.
+3. Create the source and dead-letter topics (one partition each):
+   ```bash
+   docker exec reliable-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic events --partitions 1 --replication-factor 1
+   docker exec reliable-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic events.DLT --partitions 1 --replication-factor 1
+   ```
+4. Run all automated tests **with Docker running**. Testcontainers starts its **own isolated** Kafka and PostgreSQL containers; these tests do not require the manual containers from step 2:
+   ```bash
+   mvn -B clean verify
+   ```
+   Expected: Maven reports `BUILD SUCCESS` and tests finish without failures. Docker access is mandatory for the integration tests.
+5. Start the application (keep this terminal open):
+   ```bash
+   mvn spring-boot:run
+   ```
+   Default connection values in `application.yml` match the development containers. Flyway creates the tables on startup. Wait for Spring Boot startup without connection errors. This is a **Kafka consumer, not an HTTP API**; there is no browser endpoint to open.
+6. In another terminal, send an event:
+   ```bash
+   docker exec reliable-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic events --property parse.key=true --property key.separator=:
+   ```
+   Type `order-123:{"orderId":123}` and press Enter, then stop the producer with Ctrl+C. The text before the colon is the Kafka message key and durable idempotency ID.
+7. Verify PostgreSQL persistence:
+   ```bash
+   docker exec reliable-postgres psql -U events -d events -c "SELECT event_id, payload FROM business_events;"
+   docker exec reliable-postgres psql -U events -d events -c "SELECT event_id FROM processed_events;"
+   ```
+   Expected: one row for `order-123`. Send the same key with a different payload and query again: the original payload should remain and there should still be one row for that event ID.
+8. Optional failure-path check: send a message with an **empty key** (enter `:invalid-payload` in the same producer). After configured retries, inspect the DLT:
+   ```bash
+   docker exec reliable-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic events.DLT --from-beginning --timeout-ms 30000
+   ```
+   Expected: `invalid-payload` appears. The DLT is for inspection; this sample has no replay service.
+
+**Stop and clean up:** stop Spring Boot with Ctrl+C, then run `docker rm -f reliable-kafka reliable-postgres` to remove the disposable development containers **and their stored data**. If port 5432/9092 is already in use, stop the conflicting service or adjust the port mapping **and** application connection settings. Set `DB_URL`, `DB_USER`, `DB_PASSWORD` and `KAFKA_BOOTSTRAP_SERVERS` for non-default hosts. For CI, inspect the GitHub Actions tab; the same Maven `verify` command runs there.
