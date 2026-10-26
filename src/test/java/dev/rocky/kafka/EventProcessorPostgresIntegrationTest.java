@@ -33,19 +33,19 @@ class EventProcessorPostgresIntegrationTest {
     @Autowired JdbcTemplate jdbc;
 
     @Test
-    void firstDeliveryIsClaimedAndDuplicateIsIgnored() {
+    void firstDeliveryPersistsBusinessWriteAndDuplicateDoesNotChangeIt() {
         String id = "integration-duplicate-event";
         assertTrue(processor.process(id, "first"));
         assertFalse(processor.process(id, "redelivery"));
         Integer count = jdbc.queryForObject(
-            "SELECT COUNT(*) FROM processed_events WHERE event_id = ?",
-            Integer.class, id);
+            "SELECT COUNT(*) FROM processed_events WHERE event_id = ?", Integer.class, id);
         assertEquals(1, count);
+        assertEquals("first", jdbc.queryForObject(
+            "SELECT payload FROM business_events WHERE event_id = ?", String.class, id));
     }
 
     @Test
     void invalidEventDoesNotWriteToDatabase() {
-        assertThrows(IllegalArgumentException.class,
-            () -> processor.process("", "payload"));
+        assertThrows(IllegalArgumentException.class, () -> processor.process("", "payload"));
     }
 }
